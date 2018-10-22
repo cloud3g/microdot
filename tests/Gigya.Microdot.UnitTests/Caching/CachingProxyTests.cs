@@ -11,7 +11,7 @@ using Gigya.Microdot.Interfaces.SystemWrappers;
 using Gigya.Microdot.ServiceDiscovery.Config;
 using Gigya.Microdot.ServiceProxy;
 using Gigya.Microdot.ServiceProxy.Caching;
-using Gigya.Microdot.SharedLogic.Events;
+using Gigya.Microdot.SharedLogic.SystemWrappers;
 using Gigya.Microdot.Testing.Shared;
 using Gigya.Microdot.Testing.Shared.Utils;
 using Gigya.ServiceContract.HttpService;
@@ -31,10 +31,12 @@ namespace Gigya.Microdot.UnitTests.Caching
         private Dictionary<string, string> _configDic;
         private TestingKernel<ConsoleLog> _kernel;
 
+        private Func<bool> _isFakeTime;
         private DateTime _now;
+
         private string _serviceResult;
-        private ManualResetEvent _revokeSent;
-        private ManualResetEvent _inMiddleOf;
+        private ManualResetEvent _revokeSent = new ManualResetEvent(true);
+        private ManualResetEvent _inMiddleOf = new ManualResetEvent(true);
 
         // [SetUp]
         private ICachingTestService _proxy;
@@ -55,12 +57,9 @@ namespace Gigya.Microdot.UnitTests.Caching
         [SetUp]
         public void Setup()
         {       
-            
+            _isFakeTime = () => true; // A test can override in the beginning to be able to obtain non faked time
             SetupServiceMock();
             SetupDateTime();
-            
-            _revokeSent = new ManualResetEvent(true);
-            _inMiddleOf = new ManualResetEvent(false);
 
             _proxy = _kernel.Get<ICachingTestService>();
             _cacheRevoker = _kernel.Get<ICacheRevoker>();
@@ -81,12 +80,16 @@ namespace Gigya.Microdot.UnitTests.Caching
             {
                 var result = _serviceResult;
 
-                // signal we in the middle of function
+                // Signal we in the middle of function
                 _inMiddleOf.Set();
 
+
                 // Race condition "point" between Revoke and AddGet (caching of value)
-                // If not completed, it will await for revoke request in progress
+                // It will await for revoke request in progress
                 _revokeSent.WaitOne();
+
+                // Simulate a delay in service (not required for the test, as revoke already received. Only to see difference in timings)
+                await Task.Delay(100);
 
                 return new Revocable<string>
                 {
@@ -102,11 +105,55 @@ namespace Gigya.Microdot.UnitTests.Caching
          
         }
 
+        //[Repeat(50)]
+        [Test]
+        public async Task RevokeBeforeServiceResultReceived_ShouldRevokeStaleValue()
+        {
+            // We have to use actual DateTime and not a mock returning a constant/frozen value
+            _isFakeTime = ()=> false;
+
+            var key = Guid.NewGuid().ToString();
+            await ClearCachingPolicyConfig();
+
+            // Init return value explicitly
+            _serviceResult = FirstResult;
+
+            // Block until signaled
+            _revokeSent = new ManualResetEvent(false);
+            _inMiddleOf = new ManualResetEvent(false);
+
+            // Simulate race between revoke and AddGet
+            Task.WaitAll(
+
+                // Call to service to cache FirstResult (and stuck until _revokeDelay signaled)
+                Task.Run(async () =>
+                {
+                    var result = await _proxy.CallRevocableService(key);
+                    result.Value.ShouldBe(FirstResult, "Result should have been cached");
+                }),
+
+                // Revoke the key (not truly, as value is not actually cached, yet).
+                Task.Run(async() =>
+                {
+                    _inMiddleOf.WaitOne();
+                        var eventWaiter = _revokeListener.RevokeSource.WhenEventReceived(TimeSpan.FromMinutes(1));
+                        await _cacheRevoker.Revoke(key);
+                        await eventWaiter;     // Wait the revoke will be processed
+                        await Task.Delay(0);   // Extra time to let propagate through the data block, not sure how vital it is ...
+                    _revokeSent.Set();         // Signal to continue adding/getting (value doesn't matter)
+                })
+            );
+
+            // Init return value and expect to be returned, if not cached the first one!
+            _serviceResult = SecondResult;
+            await ResultRevocableShouldBe(SecondResult, key, "Result shouldn't have been cached");
+        }
+
         private void SetupDateTime()
         {
             _now = DateTime.UtcNow;
             var dateTimeMock = Substitute.For<IDateTime>();
-            dateTimeMock.UtcNow.Returns(_=>_now);
+            dateTimeMock.UtcNow.Returns(_=> _isFakeTime() ? _now : DateTime.Now);
             _kernel.Rebind<IDateTime>().ToConstant(dateTimeMock);
         }
 
@@ -169,66 +216,6 @@ namespace Gigya.Microdot.UnitTests.Caching
             await _cacheRevoker.Revoke(key);
             await eventWaiter;
             await Task.Delay(100);
-
-            await ResultRevocableShouldBe(SecondResult, key, "Result shouldn't have been cached");
-        }
-
-        [Test]
-        public async Task RevokeBeforeServiceResultReceived_ShouldRevokeStaleValue()
-        {
-            /*
-                 Cache.GetOrAdd()
-                 +-----------+
-                             |
-                      +-----(A)---------+ Revoke
-                      |      |
-                      |      |
-                      |      |
-                      |      |
-                      +-----(B)--------->
-                             |
-                  <----------+
-
-                A - revoke begins when _InMiddleOf was set
-                B - leave CallRevocableService method and cache return value when _revokeSent was set
-
-                Generated with http://asciiflow.com/.
-            */
-
-            var key = Guid.NewGuid().ToString();
-            await ClearCachingPolicyConfig();
-
-            // Init return value explicitly
-            _serviceResult = FirstResult;
-
-            // block untill signalled
-            _revokeSent = new ManualResetEvent(false);
-            _inMiddleOf = new ManualResetEvent(false);
-
-            // Simulate race between revoke and AddGet
-            Task.WaitAll(
-
-                // Call to service to cache FirstResult (and stuck until _revokeDelay signaled)
-                Task.Run(async () =>
-                {
-                    var result = await _proxy.CallRevocableService(key);
-                    result.Value.ShouldBe(FirstResult, "Result should have been cached");
-                }),
-
-                // Revoke the key (not truly, as value is not actually cached, yet).
-                Task.Run(async() =>
-                {
-                    _inMiddleOf.WaitOne();
-                    var eventWaiter = _revokeListener.RevokeSource.WhenEventReceived(TimeSpan.FromMinutes(1));
-                    await _cacheRevoker.Revoke(key);
-                    await eventWaiter;     // Wait the revoke will be processed
-                    await Task.Delay(100); // Extra time to let propogate through the datablock (Eran insist, :-)
-                    _revokeSent.Set();    // Signal to continue adding/getting (value doesn't matter)
-                })
-            );
-
-            // Init return value and expect to be returned, if not cached the first one!
-            _serviceResult = SecondResult;
 
             await ResultRevocableShouldBe(SecondResult, key, "Result shouldn't have been cached");
         }

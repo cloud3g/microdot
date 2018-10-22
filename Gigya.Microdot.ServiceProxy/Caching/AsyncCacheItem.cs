@@ -33,6 +33,11 @@ namespace Gigya.Microdot.ServiceProxy.Caching
         public Task RefreshTask { get; set; }
 
         /// <summary>
+        /// Indicate when data source was called for actual result (beginning of request)
+        /// </summary>
+        public DateTime WhenCalled { get; set; }
+
+        /// <summary>
         /// Group name of this cache item (e.g. method name). 
         /// The group name is used to configure whether extra logData should be written for items of this group.
         /// </summary>
