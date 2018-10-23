@@ -24,6 +24,7 @@ using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Collections.Specialized;
+using System.Diagnostics;
 using System.Linq;
 using System.Reflection;
 using System.Runtime.Caching;
@@ -112,7 +113,7 @@ namespace Gigya.Microdot.ServiceProxy.Caching
         /// </summary>
         internal int CacheKeyCount => RevokeKeyToCacheKeysIndex.Sum(item => item.Value.CacheKeysSet.Count);
 
-        internal ConcurrentQueue<string> RevokesQueue { get; set; } = new ConcurrentQueue<string>();
+        internal ConcurrentQueue<Tuple<string,DateTime>> RevokesQueue { get; set; } = new ConcurrentQueue<Tuple<string,DateTime>>();
 
         public AsyncCache(ILog log, MetricsContext metrics, IDateTime dateTime, IRevokeListener revokeListener, Func<CacheConfig> getRevokeConfig)
         {
@@ -172,23 +173,22 @@ namespace Gigya.Microdot.ServiceProxy.Caching
                 }
                 else
                 {
-                    // TODO: handle discarded, we have a test we need to reevaluate
-                    _stats.Revokes.Meter("Discarded", Unit.Events).Mark();
+                    _stats.Revokes.Meter("RevokeAhead", Unit.Events).Mark();
+                    
+                    var now = DateTime.UtcNow;
                     RevokeKeyToCacheKeysIndex.AddOrUpdate(revokeKey,
-                        k => new ReverseItem
-                        {
-                            WhenRevoked = DateTime.UtcNow
+                        k => new ReverseItem{
+                            WhenRevoked = now
                         },
-                        (k, updated) =>
-                        {
-                            updated.WhenRevoked = DateTime.UtcNow;
+                        (k, updated) =>{
+                            updated.WhenRevoked = now;
                             return updated;
                         });
 
-                    RevokesQueue.Enqueue(revokeKey);
+                    RevokesQueue.Enqueue(new Tuple<string, DateTime>(revokeKey, now));
 
                     if (shouldLog)
-                        Log.Info(x => x("RevokeKey isn't in reverse index.", unencryptedTags: new { revokeKey }));
+                        Log.Info(x => x("RevokeKey is ahead of call.", unencryptedTags: new { revokeKey }));
                 }                
             }
             catch (Exception ex)
@@ -210,7 +210,7 @@ namespace Gigya.Microdot.ServiceProxy.Caching
         {
             var shouldLog = ShouldLog(groupName);
 
-            async Task<object> WrappedFactory( AsyncCacheItem item, bool removeOnException)
+            async Task<object> WrappedFactory(AsyncCacheItem item, bool removeOnException)
             {
                 try
                 {
@@ -359,7 +359,7 @@ namespace Gigya.Microdot.ServiceProxy.Caching
         /// Handle the case the revoke received in the middle of call to data source so the cacheItem should be removed.
         /// If won't be removed the cache item contains stall data and will live unless evicted by policy, mean time causing consuming of "wrong"(stall) value.
         /// </summary>
-        private void AlreadyRevoked(    AsyncCacheItem cacheItem, IEnumerable<string> revokeKeys, bool shouldLog, string groupName, string logData)
+        private void AlreadyRevoked(AsyncCacheItem cacheItem, IEnumerable<string> revokeKeys, bool shouldLog, string groupName, string logData)
         {
             foreach (var revokeKey in revokeKeys)
             {
@@ -371,19 +371,16 @@ namespace Gigya.Microdot.ServiceProxy.Caching
                 if (reverseItem.WhenRevoked < cacheItem.WhenCalled) 
                     continue;
 
-                // TODO: remove/relocate
-                Log.Info(x => x($"called: {cacheItem.WhenCalled:HH:mm:ss.fff}, revoked:{reverseItem.WhenRevoked:HH:mm:ss.fff}, received: {DateTime.UtcNow:HH:mm:ss.fff}"));
-
                 // Race with OnRevoke, avoid possible modification exception
                 var cacheKeys = reverseItem.CacheKeysSet.ToList();
                 foreach (var cacheKey in cacheKeys)
                 {
-                    // Null returned if not found, will cause Callback to run, cleaning reverse index
+                    // Null returned if not found, will cause to Callback to run that us cleaning reverse index
                     var isRemoved = MemoryCache.Remove(cacheKey) != null;
 
                     // TODO: Add test
                     if(isRemoved)
-                        _stats.RevokedOnCall.Meter("Revoked on call", Unit.Events).Mark();
+                        _stats.RevokedOnCall.Counter("Revoked on call", Unit.Events).Increment();
                     
                     if (shouldLog)
                     {
@@ -393,7 +390,9 @@ namespace Gigya.Microdot.ServiceProxy.Caching
                             cacheKey,
                             cacheGroup = groupName,
                             cacheData = logData,
-                            removed
+                            removed,
+                            revokeKey,
+                            diff = (cacheItem.WhenCalled - reverseItem.WhenRevoked).TotalMilliseconds
                         }));
                     }
                 }
@@ -402,28 +401,39 @@ namespace Gigya.Microdot.ServiceProxy.Caching
 
         private void MaintainRevokesQueue()
         {
+            // Dequeue items older than interval.
+            // On dequeue, remove items from reverse index if no cache keys stored.
+
             int intervalMs = 60000; // only to calm the compiler
             try
             {
                 var config = GetRevokeConfig();
                 intervalMs = config.RevokesCleanupMilliseconds;
+                
 
                 var mark = DateTime.UtcNow - TimeSpan.FromMilliseconds(intervalMs);
-                var limit = RevokesQueue.Count;
-                do
+                
+                while(RevokesQueue.TryPeek(out var revoke))
                 {
-                    if (!RevokesQueue.TryPeek(out var revokeKey))
+                    // Empty queue
+                    var whenRevoked = revoke.Item2;
+
+                    // All younger
+                    if (whenRevoked > mark)
                         break;
-                    
-                    // Skip if can't find in reverse index
+
+                    var revokeKey = revoke.Item1;
+                    // Remove, if can't find in reverse index
                     if (!RevokeKeyToCacheKeysIndex.TryGetValue(revokeKey, out var reverseItem))
                         RevokesQueue.TryDequeue(out _);
 
                     // "Empty" keys and older than interval.
-                    else if (reverseItem.WhenRevoked < mark && reverseItem.CacheKeysSet.Count == 0)
-                        RevokeKeyToCacheKeysIndex.TryRemove(revokeKey, out var __);
-
-                } while(limit-- > 0);
+                    else if (reverseItem.CacheKeysSet.Count == 0)
+                    {
+                        RevokeKeyToCacheKeysIndex.TryRemove(revokeKey, out _);
+                        RevokesQueue.TryDequeue(out _);
+                    }
+                }
             }
             catch (Exception ex)
             {
@@ -535,6 +545,7 @@ namespace Gigya.Microdot.ServiceProxy.Caching
             if (oldMemoryCache != null)
             {
                 // Disposing of MemoryCache can be a CPU intensive task and should therefore not block the current thread.
+                // Triggering callback to run and clean up the reverse index
                 Task.Run(() => oldMemoryCache.Dispose());
                 _stats.ClearCache.Increment();
             }
@@ -561,11 +572,11 @@ namespace Gigya.Microdot.ServiceProxy.Caching
 
         public void Dispose()
         {
-            MemoryCache?.Dispose();
-            RevokeDisposable?.Dispose();
-
             _monitorTimer.Dispose();
             _monitorTask?.Wait();
+            
+            MemoryCache?.Dispose();
+            RevokeDisposable?.Dispose();
         }
     }
 }

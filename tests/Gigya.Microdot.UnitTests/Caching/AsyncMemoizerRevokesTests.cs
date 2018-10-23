@@ -101,7 +101,7 @@ namespace Gigya.Microdot.UnitTests.Caching
             {
                 MetersSettings = new MetricsCheckSetting { CheckValues = true },
                 Meters = new List<MetricDataEquatable> {
-                    new MetricDataEquatable {Name = "Discarded", Unit = Unit.Events, Value = 1},
+                    new MetricDataEquatable {Name = "RevokeAhead", Unit = Unit.Events, Value = 1},
                 }
             });
 
