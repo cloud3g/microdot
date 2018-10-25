@@ -98,7 +98,7 @@ namespace Gigya.Microdot.UnitTests.Caching
         {
             _now = DateTime.UtcNow;
             var dateTimeMock = Substitute.For<IDateTime>();
-            dateTimeMock.UtcNow.Returns(_=> _isFakeTime() ? _now : DateTime.Now);
+            dateTimeMock.UtcNow.Returns(_=> _isFakeTime() ? _now : DateTime.UtcNow);
             _kernel.Rebind<IDateTime>().ToConstant(dateTimeMock);
         }
 
@@ -124,7 +124,7 @@ namespace Gigya.Microdot.UnitTests.Caching
         }
 
         [Test]
-        public async Task CachingOfOtherMathodDisabledByConfiguration()
+        public async Task CachingOfOtherMethodDisabledByConfiguration()
         {
             await SetCachingPolicyConfig(new[] { "Methods.OtherMethod.Enabled", "false" });
             await ResultShouldBeCached();
@@ -244,7 +244,7 @@ namespace Gigya.Microdot.UnitTests.Caching
         Task<string> OtherMethod();
 
         [Cached]
-        Task<Revocable<string>> CallRevocableService(string keyToRevock);
+        Task<Revocable<string>> CallRevocableService(string keyToRevoke);
     }
 
     public class FakeRevokingManager : ICacheRevoker, IRevokeListener

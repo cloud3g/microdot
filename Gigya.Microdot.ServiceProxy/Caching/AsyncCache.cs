@@ -24,7 +24,6 @@ using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Collections.Specialized;
-using System.Diagnostics;
 using System.Linq;
 using System.Reflection;
 using System.Runtime.Caching;
@@ -36,13 +35,11 @@ using Gigya.Microdot.Interfaces.SystemWrappers;
 using Gigya.ServiceContract.HttpService;
 using Metrics;
 using System.Threading.Tasks.Dataflow;
-using Timer = System.Threading.Timer;
 
 // ReSharper disable InconsistentlySynchronizedField
 
 namespace Gigya.Microdot.ServiceProxy.Caching
 {
-
     public sealed class AsyncCache : IMemoryCacheManager, IServiceProvider, IDisposable
     {
         private class Statistics
@@ -91,16 +88,8 @@ namespace Gigya.Microdot.ServiceProxy.Caching
 
         private readonly Statistics _stats;
 
-        internal class ReverseItem
-        {
-            public HashSet<string> CacheKeysSet = new HashSet<string>();
-            public DateTime WhenRevoked = System.DateTime.MinValue;
-        }
-
+        private readonly IRevokeQueueMaintainer _revokesMaintainer;
         internal ConcurrentDictionary<string, ReverseItem> RevokeKeyToCacheKeysIndex { get; set; } = new ConcurrentDictionary<string, ReverseItem>();
-
-        private Task _monitorTask;
-        private readonly Timer _monitorTimer;
 
         private IDisposable RevokeDisposable { get; }
 
@@ -113,10 +102,12 @@ namespace Gigya.Microdot.ServiceProxy.Caching
         /// </summary>
         internal int CacheKeyCount => RevokeKeyToCacheKeysIndex.Sum(item => item.Value.CacheKeysSet.Count);
 
-        internal ConcurrentQueue<Tuple<string,DateTime>> RevokesQueue { get; set; } = new ConcurrentQueue<Tuple<string,DateTime>>();
-
-        public AsyncCache(ILog log, MetricsContext metrics, IDateTime dateTime, IRevokeListener revokeListener, Func<CacheConfig> getRevokeConfig)
+        public AsyncCache(ILog log, MetricsContext metrics, IDateTime dateTime, IRevokeListener revokeListener, Func<CacheConfig> getRevokeConfig, IRevokeQueueMaintainer revokesMaintainer)
         {
+            // Clean up queue of revokes periodically
+            _revokesMaintainer = revokesMaintainer;
+            _revokesMaintainer.ReverseIndex = RevokeKeyToCacheKeysIndex;
+
             DateTime = dateTime;
             GetRevokeConfig = getRevokeConfig;
             _stats = new Statistics(this, metrics);
@@ -131,10 +122,6 @@ namespace Gigya.Microdot.ServiceProxy.Caching
 
             var onRevoke = new ActionBlock<string>(OnRevoke);
             RevokeDisposable = revokeListener.RevokeSource.LinkTo(onRevoke);
-
-            // Clean up queue of revokes periodically
-            _monitorTimer = new Timer(state => _monitorTask = Task.Run(() => MaintainRevokesQueue()));
-            _monitorTimer.Change(0, Timeout.Infinite);
         }
 
         private Task OnRevoke(string revokeKey)
@@ -174,18 +161,8 @@ namespace Gigya.Microdot.ServiceProxy.Caching
                 else
                 {
                     _stats.Revokes.Meter("RevokeAhead", Unit.Events).Mark();
-                    
-                    var now = DateTime.UtcNow;
-                    RevokeKeyToCacheKeysIndex.AddOrUpdate(revokeKey,
-                        k => new ReverseItem{
-                            WhenRevoked = now
-                        },
-                        (k, updated) =>{
-                            updated.WhenRevoked = now;
-                            return updated;
-                        });
 
-                    RevokesQueue.Enqueue(new Tuple<string, DateTime>(revokeKey, now));
+                    _revokesMaintainer.Enqueue(revokeKey, DateTime.UtcNow);
 
                     if (shouldLog)
                         Log.Info(x => x("RevokeKey is ahead of call.", unencryptedTags: new { revokeKey }));
@@ -368,7 +345,7 @@ namespace Gigya.Microdot.ServiceProxy.Caching
                     continue;
 
                 // The cached item should be removed as revoke received after calling to data source
-                if (reverseItem.WhenRevoked < cacheItem.WhenCalled) 
+                if (reverseItem.WhenRevoked < cacheItem.WhenCalled)
                     continue;
 
                 // Race with OnRevoke, avoid possible modification exception
@@ -392,64 +369,12 @@ namespace Gigya.Microdot.ServiceProxy.Caching
                             cacheData = logData,
                             removed,
                             revokeKey,
-                            diff = (cacheItem.WhenCalled - reverseItem.WhenRevoked).TotalMilliseconds
+                            diff = cacheItem.WhenCalled - reverseItem.WhenRevoked
                         }));
                     }
                 }
             }
         }
-
-        private void MaintainRevokesQueue()
-        {
-            // Dequeue items older than interval.
-            // On dequeue, remove items from reverse index if no cache keys stored.
-
-            int intervalMs = 60000; // only to calm the compiler
-            try
-            {
-                var config = GetRevokeConfig();
-                intervalMs = config.RevokesCleanupMilliseconds;
-                
-
-                var mark = DateTime.UtcNow - TimeSpan.FromMilliseconds(intervalMs);
-                
-                while(RevokesQueue.TryPeek(out var revoke))
-                {
-                    // Empty queue
-                    var whenRevoked = revoke.Item2;
-
-                    // All younger
-                    if (whenRevoked > mark)
-                        break;
-
-                    var revokeKey = revoke.Item1;
-                    // Remove, if can't find in reverse index
-                    if (!RevokeKeyToCacheKeysIndex.TryGetValue(revokeKey, out var reverseItem))
-                        RevokesQueue.TryDequeue(out _);
-
-                    // "Empty" keys and older than interval.
-                    else if (reverseItem.CacheKeysSet.Count == 0)
-                    {
-                        RevokeKeyToCacheKeysIndex.TryRemove(revokeKey, out _);
-                        RevokesQueue.TryDequeue(out _);
-                    }
-                }
-            }
-            catch (Exception ex)
-            {
-                Log.Critical(x => x("Programmatic error", exception: ex));
-            }
-            finally
-            {
-                try 
-                {
-                    // Schedule next iteration
-                    _monitorTimer.Change( intervalMs, Timeout.Infinite); 
-                }
-                catch (ObjectDisposedException) {}
-            }
-        }
-
 
         private ConcurrentDictionary<Type, FieldInfo> _revocableValueFieldPerType = new ConcurrentDictionary<Type, FieldInfo>();
         private string GetValueForLogging(object value)
@@ -572,9 +497,6 @@ namespace Gigya.Microdot.ServiceProxy.Caching
 
         public void Dispose()
         {
-            _monitorTimer.Dispose();
-            _monitorTask?.Wait();
-            
             MemoryCache?.Dispose();
             RevokeDisposable?.Dispose();
         }
