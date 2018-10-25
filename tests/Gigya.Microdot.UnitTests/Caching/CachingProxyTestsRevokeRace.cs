@@ -29,7 +29,7 @@ namespace Gigya.Microdot.UnitTests.Caching
         private TestingKernel<ConsoleLog> _kernel;
 
         // We have to use actual DateTime and not a mock returning a constant/frozen value
-        private Func<bool> _isTrueTime = ()=>true;
+        private Func<bool> _isTrueTime = () => true;
         private DateTime _now;
 
         private string _serviceResult;
@@ -60,7 +60,7 @@ namespace Gigya.Microdot.UnitTests.Caching
         }
 
         private void SetupServiceMock()
-        {             
+        {
             _serviceMock = Substitute.For<ICachingTestService>();
             _serviceMock.CallService().Returns(_ => Task.FromResult(_serviceResult));
             _serviceMock.CallRevocableService(Arg.Any<string>()).Returns(async s =>
@@ -82,11 +82,84 @@ namespace Gigya.Microdot.UnitTests.Caching
                     RevokeKeys = new[] {s.Args()[0].ToString()}
                 };
             });
-        
+
             _serviceResult = FirstResult;
             var serviceProxyMock = Substitute.For<IServiceProxyProvider<ICachingTestService>>();
             serviceProxyMock.Client.Returns(_serviceMock);
             _kernel.Rebind<IServiceProxyProvider<ICachingTestService>>().ToConstant(serviceProxyMock);
+        }
+
+
+        [Description("The test demonstrating the race problem while refreshing the value.")]
+        [Test]
+        public async Task RevokesAhead_RaceOnRefresh()
+        {
+            var refreshTime = TimeSpan.FromSeconds(1);
+            _configDic = new Dictionary<string,string>
+            {
+                ["Discovery.Services.CachingTestService.CachingPolicy.RefreshTime"]=refreshTime.ToString(),
+                ["Discovery.Services.CachingTestService.CachingPolicy.Methods.CallRevocableService.RefreshTime"]=refreshTime.ToString()
+            };
+            _kernel = new TestingKernel<ConsoleLog>(mockConfig: _configDic);
+
+            _kernel.Rebind(typeof(CachingProxyProvider<>)).ToSelf().InTransientScope();
+            _kernel.Rebind<ICacheRevoker, IRevokeListener>().ToConstant(new FakeRevokingManager());
+            
+            var c = _kernel.Get<Func<DiscoveryConfig>>()(); // required
+
+            c.Services["CachingTestService"].CachingPolicy.RefreshTime.ShouldBe(refreshTime);
+            c.Services["CachingTestService"].CachingPolicy.Methods["CallRevocableService"].RefreshTime.ShouldBe(refreshTime);
+
+            SetupServiceMock();
+            SetupDateTime();
+
+            _isTrueTime = () => true;
+
+            _proxy = _kernel.Get<ICachingTestService>();
+            _cacheRevoker = _kernel.Get<ICacheRevoker>();
+            _revokeListener = _kernel.Get<IRevokeListener>();
+
+            var key = Guid.NewGuid().ToString();
+
+            _serviceResult = FirstResult;
+            
+            await ResultRevocableShouldBe(FirstResult, key);
+            
+            // still not updated
+            _serviceResult = SecondResult;
+            await ResultRevocableShouldBe(FirstResult, key);
+
+            //
+            await Task.Delay(refreshTime + TimeSpan.FromMilliseconds(100));
+
+            // Simulate race between revoke and AddGet
+            _revokeSent.Reset();
+            _inMiddleOf.Reset();
+
+            
+            Task.WaitAll(
+
+                Task.Run(async () =>
+                {
+                    // expected to trigger refresh task and signal to _inMiddleOf.
+                    _serviceResult = "third";
+                    var result = await _proxy.CallRevocableService(key);
+                }),
+
+                // Revoke the key (not truly, as value is not actually cached, yet).
+                Task.Run(async() =>
+                {
+                    _inMiddleOf.WaitOne();
+                        var eventWaiter = _revokeListener.RevokeSource.WhenEventReceived(TimeSpan.FromMinutes(1));
+                        await _cacheRevoker.Revoke(key);
+                        await eventWaiter;     // Wait the revoke will be processed
+                    _revokeSent.Set();     // Signal to continue adding/getting
+                })
+            );
+
+            _serviceResult = "Yellow";
+            await ResultRevocableShouldBe("Yellow", key, "Result shouldn't have been cached");
+
         }
 
         /*
@@ -106,13 +179,13 @@ namespace Gigya.Microdot.UnitTests.Caching
                                   |                                    |   _cacheRevoker.Revoke(key);  |
                                   |                                   3)------------------------------->
                                   |                                    |                         4)OnRevoke()
-                                  |                            5)await eventWaiter;                    |
-                                  |                                    |                               |
+                                  |                            5)await eventWaiter;              8.1)  |--------> Enqueue
+                                  |                                    |                               |        Maintainer
                          _revokeSent.WaitOne();                 6)revokeSent.Set()                     |
                                   |                                    |                               |
                                   7)<----------------------------------|                               |
                                   |                                    |                               |
-                                  |                                    |                               |
+                        8) AlreadyRevoked(...)                         |                               |
                                   |                                    |                               |
         <-------------------------+
 
@@ -132,7 +205,8 @@ namespace Gigya.Microdot.UnitTests.Caching
 
             _kernel.Rebind(typeof(CachingProxyProvider<>)).ToSelf().InTransientScope();
             _kernel.Rebind<ICacheRevoker, IRevokeListener>().ToConstant(new FakeRevokingManager());
-
+            var c = _kernel.Get<Func<DiscoveryConfig>>()(); // required
+            
             // Disable completely revoke tracing
             var revokeQueue = Substitute.For<IRevokeQueueMaintainer>();
             _kernel.Rebind<IRevokeQueueMaintainer>().ToConstant(revokeQueue);
@@ -182,7 +256,7 @@ namespace Gigya.Microdot.UnitTests.Caching
 
         
         [Test]
-        [Repeat(5)]
+        [Repeat(1)]
         public async Task RevokeBeforeServiceResultReceived_ShouldRevokeStaleValue()
         {
             _configDic = new Dictionary<string,string>();
@@ -190,6 +264,7 @@ namespace Gigya.Microdot.UnitTests.Caching
 
             _kernel.Rebind(typeof(CachingProxyProvider<>)).ToSelf().InTransientScope();
             _kernel.Rebind<ICacheRevoker, IRevokeListener>().ToConstant(new FakeRevokingManager());
+            var c = _kernel.Get<Func<DiscoveryConfig>>()(); // required
 
             SetupServiceMock();
             SetupDateTime();
@@ -222,9 +297,9 @@ namespace Gigya.Microdot.UnitTests.Caching
                 Task.Run(async() =>
                 {
                     _inMiddleOf.WaitOne();
-                    var eventWaiter = _revokeListener.RevokeSource.WhenEventReceived(TimeSpan.FromMinutes(1));
-                    await _cacheRevoker.Revoke(key);
-                    await eventWaiter;     // Wait the revoke will be processed
+                        var eventWaiter = _revokeListener.RevokeSource.WhenEventReceived(TimeSpan.FromMinutes(1));
+                        await _cacheRevoker.Revoke(key);
+                        await eventWaiter;     // Wait the revoke will be processed
                     _revokeSent.Set();     // Signal to continue adding/getting
                 })
             );
@@ -240,12 +315,13 @@ namespace Gigya.Microdot.UnitTests.Caching
         {
             int x = 100;
             
-            _configDic = new Dictionary<string, string>{["Cache.RevokesCleanupMilliseconds"] = x.ToString()};
+            _configDic = new Dictionary<string, string>{["Cache.RevokesCleanupMs"] = x.ToString()};
             _kernel = new TestingKernel<ConsoleLog>(mockConfig: _configDic);
+            var c = _kernel.Get<Func<DiscoveryConfig>>()(); // required
 
             SetupDateTime();
             
-            _kernel.Get<Func<CacheConfig>>()().RevokesCleanupMilliseconds.ShouldBe(x);
+            _kernel.Get<Func<CacheConfig>>()().RevokesCleanupMs.ShouldBe(x);
 
             var maintainer = _kernel.Get<IRevokeQueueMaintainer>();
             
@@ -272,12 +348,13 @@ namespace Gigya.Microdot.UnitTests.Caching
         {
             int x = Timeout.Infinite; // disable periodic cleanup
 
-            _configDic = new Dictionary<string, string>{["Cache.RevokesCleanupMilliseconds"] = x.ToString()};
+            _configDic = new Dictionary<string, string>{["Cache.RevokesCleanupMs"] = x.ToString()};
             _kernel = new TestingKernel<ConsoleLog>(mockConfig: _configDic);
+            var c = _kernel.Get<Func<DiscoveryConfig>>()(); // required
 
             SetupDateTime();
             
-            _kernel.Get<Func<CacheConfig>>()().RevokesCleanupMilliseconds.ShouldBe(x);
+            _kernel.Get<Func<CacheConfig>>()().RevokesCleanupMs.ShouldBe(x);
 
             var maintainer = _kernel.Get<IRevokeQueueMaintainer>();
             

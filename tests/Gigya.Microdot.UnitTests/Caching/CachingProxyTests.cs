@@ -47,6 +47,7 @@ namespace Gigya.Microdot.UnitTests.Caching
 
             _kernel.Rebind(typeof(CachingProxyProvider<>)).ToSelf().InTransientScope();
             _kernel.Rebind<ICacheRevoker, IRevokeListener>().ToConstant(new FakeRevokingManager());
+            var getDiscoveryConfigToEnableConfigEventsToBeRaised = _kernel.Get<DiscoveryConfig>();
         }
 
         [SetUp]

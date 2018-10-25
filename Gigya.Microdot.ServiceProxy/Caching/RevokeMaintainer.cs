@@ -64,7 +64,7 @@ namespace Gigya.Microdot.ServiceProxy.Caching
 
             _timer = new Timer(_ =>
             {
-                var intervalMs = getRevokeConfig().RevokesCleanupMilliseconds;
+                var intervalMs = getRevokeConfig().RevokesCleanupMs;
                 try
                 {
                     Maintain(TimeSpan.FromMilliseconds(intervalMs));
