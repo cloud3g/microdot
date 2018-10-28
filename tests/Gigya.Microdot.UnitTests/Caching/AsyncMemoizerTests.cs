@@ -1,4 +1,5 @@
 ﻿using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Linq;
 using System.Reflection;
@@ -50,8 +51,8 @@ namespace Gigya.Microdot.UnitTests.Caching
 
             var consoleLog = new ConsoleLog();
             Func<CacheConfig> revokeConfig = () => new CacheConfig();
-            return new AsyncCache(consoleLog, Metric.Context("AsyncCache"), TimeFake, revokeListener, revokeConfig, 
-                                  new RevokeQueueMaintainer(consoleLog, revokeConfig));
+            Func<ConcurrentDictionary<string, ReverseItem>, IRevokeQueueMaintainer> createRM = index => new RevokeQueueMaintainer(index, consoleLog, revokeConfig);
+            return new AsyncCache(consoleLog, Metric.Context("AsyncCache"), TimeFake, revokeListener, revokeConfig, createRM);
         }
         
         private IMemoizer CreateMemoizer(AsyncCache cache)
@@ -281,11 +282,10 @@ namespace Gigya.Microdot.UnitTests.Caching
 
             var consoleLog = new ConsoleLog();
             Func<CacheConfig> revokeConfig = () => new CacheConfig();
+            Func<ConcurrentDictionary<string, ReverseItem>, IRevokeQueueMaintainer> createRM = index => new RevokeQueueMaintainer(index, consoleLog, revokeConfig);
 
-            IMemoizer memoizer = new AsyncMemoizer(new AsyncCache(consoleLog, Metric.Context("AsyncCache"), 
-                                                        new DateTimeImpl(), new EmptyRevokeListener(), revokeConfig, 
-                                                        new RevokeQueueMaintainer(consoleLog, revokeConfig)), 
-                                                        new MetadataProvider(), Metric.Context("Tests"));
+            IMemoizer memoizer = new AsyncMemoizer(new AsyncCache(consoleLog, Metric.Context("AsyncCache"), new DateTimeImpl(), new EmptyRevokeListener(), revokeConfig, createRM), 
+                                                   new MetadataProvider(), Metric.Context("Tests"));
 
             // T = 0s. No data in cache, should retrieve value from source (5).
             (await (Task<Thing>)memoizer.Memoize(dataSource, ThingifyTaskThing, args, GetPolicy(4, 1))).Id.ShouldBe(5);
@@ -322,11 +322,11 @@ namespace Gigya.Microdot.UnitTests.Caching
 
             var consoleLog = new ConsoleLog();
             Func<CacheConfig> revokeConfig = () => new CacheConfig();
+            Func<ConcurrentDictionary<string, ReverseItem>, IRevokeQueueMaintainer> createRM = index => new RevokeQueueMaintainer(index, consoleLog, revokeConfig);
 
-            IMemoizer memoizer = new AsyncMemoizer(new AsyncCache(consoleLog, Metric.Context("AsyncCache"), 
-                    new DateTimeImpl(), new EmptyRevokeListener(), revokeConfig, 
-                    new RevokeQueueMaintainer(consoleLog, revokeConfig)), 
-                    new MetadataProvider(), Metric.Context("Tests"));
+            IMemoizer memoizer = new AsyncMemoizer(new AsyncCache(consoleLog, Metric.Context("AsyncCache"), new DateTimeImpl(), new EmptyRevokeListener(), revokeConfig, createRM), 
+                new MetadataProvider(), Metric.Context("Tests"));
+
 
             // T = 0s. No data in cache, should retrieve value from source (870).
             (await (Task<Thing>)memoizer.Memoize(dataSource, ThingifyTaskThing, args, GetPolicy(5, 1, 100))).Id.ShouldBe(870);

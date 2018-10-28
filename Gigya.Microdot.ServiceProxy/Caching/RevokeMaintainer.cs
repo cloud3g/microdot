@@ -23,6 +23,7 @@
 using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
+using System.Linq;
 using System.Threading;
 using Gigya.Microdot.Interfaces.Logging;
 
@@ -38,8 +39,6 @@ namespace Gigya.Microdot.ServiceProxy.Caching
 
     public interface IRevokeQueueMaintainer : IDisposable
     {
-        ConcurrentDictionary<string, ReverseItem> ReverseIndex { get; set; }
-
         int QueueCount { get; }
 
         void Enqueue(string revokeKey, DateTime now);
@@ -54,12 +53,13 @@ namespace Gigya.Microdot.ServiceProxy.Caching
     {
         private readonly Timer _timer;
         private readonly ConcurrentQueue<Tuple<string, DateTime>> _revokesQueue;
+        private  readonly ConcurrentDictionary<string, ReverseItem> _reverseIndex;
 
-        public ConcurrentDictionary<string, ReverseItem> ReverseIndex { get; set; }
         public int QueueCount => _revokesQueue.Count;
 
-        public RevokeQueueMaintainer(ILog log, Func<CacheConfig> getRevokeConfig)
+        public RevokeQueueMaintainer(ConcurrentDictionary<string, ReverseItem> reverseIndex, ILog log, Func<CacheConfig> getRevokeConfig)
         {
+            _reverseIndex = reverseIndex;
             _revokesQueue = new ConcurrentQueue<Tuple<string, DateTime>>();
 
             _timer = new Timer(_ =>
@@ -84,46 +84,28 @@ namespace Gigya.Microdot.ServiceProxy.Caching
 
         public void Enqueue(string revokeKey, DateTime now)
         {
-            if (ReverseIndex == null)
-                throw new ArgumentNullException($"{nameof(ReverseIndex)} remained uninitialized!", nameof(ReverseIndex));
-
-            ReverseIndex.AddOrUpdate(revokeKey,
-                k => new ReverseItem{
-                    WhenRevoked = now
-                },
-                (k, updated) =>{
-                    updated.WhenRevoked = now;
-                    return updated;
-                });
-
             _revokesQueue.Enqueue(new Tuple<string, DateTime>(revokeKey, now));
         }
 
         public void Maintain(TimeSpan olderThan)
         {
-            var mark = DateTime.UtcNow - olderThan;
+            var cutOffTime = DateTime.UtcNow - olderThan;
 
-            if (ReverseIndex != null)
-                while (_revokesQueue.TryPeek(out var revoke)) // Empty queue
-                {
-                    var whenRevoked = revoke.Item2;
-                    var revokeKey = revoke.Item1;
+            while (_revokesQueue.TryPeek(out var revoke)) // Empty queue
+            {
+                var whenRevoked = revoke.Item2;
+                var revokeKey = revoke.Item1;
 
-                    // All younger
-                    if (whenRevoked > mark)
-                        break;
+                // All younger
+                if (whenRevoked > cutOffTime)
+                    break;
 
-                    // Remove, if can't find in reverse index
-                    if (!ReverseIndex.TryGetValue(revokeKey, out var reverseItem))
-                        _revokesQueue.TryDequeue(out _);
+                _revokesQueue.TryDequeue(out _);
 
-                    // "Empty" keys and older than interval.
-                    else if (reverseItem.CacheKeysSet.Count == 0)
-                    {
-                        ReverseIndex.TryRemove(revokeKey, out _);
-                        _revokesQueue.TryDequeue(out _);
-                    }
-                }
+                // "Empty" keys and older than interval.
+                if (_reverseIndex.TryGetValue(revokeKey, out var reverseItem) && !reverseItem.CacheKeysSet.Any())
+                    _reverseIndex.TryRemove(revokeKey, out _);
+            }
         }
 
         public void Dispose()

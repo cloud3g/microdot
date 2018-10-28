@@ -11,17 +11,8 @@ namespace Gigya.Microdot.Ninject
     {
         public void Init()
         {
-            int regexDefaultMatchTimeOutMs = (int)TimeSpan.FromSeconds(10).TotalMilliseconds;
-            try
-            {
-                var strValue = ConfigurationManager.AppSettings["regexDefaultMachTimeOutMs"];
-                if(strValue != null)
-                    regexDefaultMatchTimeOutMs = int.Parse(strValue);
-            }
-            catch (Exception)
-            {
-                // there is nothing to do about
-            }
+            if (!int.TryParse(ConfigurationManager.AppSettings["regexDefaultMatchTimeOutMs"], out var regexDefaultMatchTimeOutMs))
+                regexDefaultMatchTimeOutMs = (int) TimeSpan.FromSeconds(10).TotalMilliseconds;
 
             AppDomain.CurrentDomain.SetData("REGEX_DEFAULT_MATCH_TIMEOUT", TimeSpan.FromMilliseconds(regexDefaultMatchTimeOutMs));
             Console.WriteLine($"REGEX_DEFAULT_MATCH_TIMEOUT is set to {regexDefaultMatchTimeOutMs} ms");

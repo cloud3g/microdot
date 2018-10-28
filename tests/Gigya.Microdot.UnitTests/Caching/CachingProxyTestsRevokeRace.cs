@@ -191,70 +191,6 @@ namespace Gigya.Microdot.UnitTests.Caching
 
         */
 
-        [Description("The test demonstrating the race problem w/o revokes maintaining.")]
-        [Test]
-        public async Task RevokesAheadAreNotSaved_RaceWillHappen()
-        {
-            // Init service
-            // Call to revokable service, with revoke with an expected revoke in the middle.
-            // Issue a revoke (such it will be in the middle of call)
-            // Revokes will be lost because of the mock.
-            // The stall value will be returned instead expected new one.
-
-            _kernel = new TestingKernel<ConsoleLog>(mockConfig: _configDic);
-
-            _kernel.Rebind(typeof(CachingProxyProvider<>)).ToSelf().InTransientScope();
-            _kernel.Rebind<ICacheRevoker, IRevokeListener>().ToConstant(new FakeRevokingManager());
-            var c = _kernel.Get<Func<DiscoveryConfig>>()(); // required
-            
-            // Disable completely revoke tracing
-            var revokeQueue = Substitute.For<IRevokeQueueMaintainer>();
-            _kernel.Rebind<IRevokeQueueMaintainer>().ToConstant(revokeQueue);
-
-            SetupServiceMock();
-            SetupDateTime();
-
-            _proxy = _kernel.Get<ICachingTestService>();
-            _cacheRevoker = _kernel.Get<ICacheRevoker>();
-            _revokeListener = _kernel.Get<IRevokeListener>();
-
-            var key = Guid.NewGuid().ToString();
-
-            _serviceResult = FirstResult;
-
-            // Simulate race between Revoke and AddGet
-            _revokeSent = new ManualResetEvent(false);
-            _inMiddleOf = new ManualResetEvent(false);
-
-
-            Task.WaitAll(
-
-                // Call to service to cache FirstResult (and stuck until _revokeDelay signaled)
-                Task.Run(async () =>
-                {
-                    var result = await _proxy.CallRevocableService(key);
-                    result.Value.ShouldBe(FirstResult, "Result should have been cached");
-                }),
-
-                // Revoke the key (not truly, as value is not actually cached, yet).
-                Task.Run(async() =>
-                {
-                    _inMiddleOf.WaitOne();
-                    var eventWaiter = _revokeListener.RevokeSource.WhenEventReceived(TimeSpan.FromMinutes(1));
-                    await _cacheRevoker.Revoke(key);
-                    await eventWaiter;     // Wait the revoke will be processed
-                    _revokeSent.Set();     // Signal to continue adding/getting
-                })
-            );
-
-            // Init return value (expect to be returned)
-            _serviceResult = SecondResult;
-
-            // As revokes was cleaned, we are getting FirstResult (stall value), instead second one would have expected
-            await ResultRevocableShouldBe(FirstResult, key, "Expecting previous call value");
-        }
-
-        
         [Test]
         [Repeat(1)]
         public async Task RevokeBeforeServiceResultReceived_ShouldRevokeStaleValue()
@@ -323,10 +259,10 @@ namespace Gigya.Microdot.UnitTests.Caching
             
             _kernel.Get<Func<CacheConfig>>()().RevokesCleanupMs.ShouldBe(x);
 
-            var maintainer = _kernel.Get<IRevokeQueueMaintainer>();
-            
+            var maintainerF = _kernel.Get<Func<ConcurrentDictionary<string, ReverseItem>, IRevokeQueueMaintainer>>();
+
             var reverseIndex = new ConcurrentDictionary<string, ReverseItem>();
-            maintainer.ReverseIndex = reverseIndex;
+            var maintainer = maintainerF(reverseIndex);
 
             var dateTime = DateTime.UtcNow;
             var total = 500;
@@ -346,45 +282,28 @@ namespace Gigya.Microdot.UnitTests.Caching
         [Test]
         public async Task RevokeMaintainer_ShouldCleanupOnlyOlderThan()
         {
-            int x = Timeout.Infinite; // disable periodic cleanup
-
-            _configDic = new Dictionary<string, string>{["Cache.RevokesCleanupMs"] = x.ToString()};
+            _configDic = new Dictionary<string, string>();
             _kernel = new TestingKernel<ConsoleLog>(mockConfig: _configDic);
-            var c = _kernel.Get<Func<DiscoveryConfig>>()(); // required
 
-            SetupDateTime();
-            
-            _kernel.Get<Func<CacheConfig>>()().RevokesCleanupMs.ShouldBe(x);
+            var maintainerF = _kernel.Get<Func<ConcurrentDictionary<string, ReverseItem>, IRevokeQueueMaintainer>>();
 
-            var maintainer = _kernel.Get<IRevokeQueueMaintainer>();
-            
             var reverseIndex = new ConcurrentDictionary<string, ReverseItem>();
-            maintainer.ReverseIndex = reverseIndex;
+            var maintainer = maintainerF(reverseIndex);
 
             var dateTime = DateTime.UtcNow;
             var total = 500;
 
             // Add items, half older, half younger, IT IS A fifo QUEUE!
-            for (int i = 0; i < total; i++)
-                maintainer.Enqueue("revokeKey" + i, dateTime + 
-                                                    (i < total/2 
-                                                        ? -TimeSpan.FromHours(1)   // older
-                                                        : TimeSpan.FromHours(1))); // younger
-            // expect to clean half older
+            for (int i = 0; i < total/2; i++)
+                maintainer.Enqueue("revokeKey", dateTime -TimeSpan.FromHours(1));   // older
+
+            for (int i = 0; i < total/2; i++)
+                maintainer.Enqueue("revokeKey", dateTime + TimeSpan.FromHours(1));   // younger
+
+            // expect to clean half
             maintainer.Maintain(TimeSpan.FromSeconds(30));
 
-            reverseIndex.Count.ShouldBe(total / 2);
             maintainer.QueueCount.ShouldBe(total / 2);
-
-        }
-
-        [Test]
-        public async Task RevokeMaintainer_ThrowOnReverseIndexNotInitialized()
-        {
-            _kernel = new TestingKernel<ConsoleLog>(mockConfig: _configDic);
-            var maintainer = _kernel.Get<IRevokeQueueMaintainer>();
-            maintainer.ReverseIndex = null;
-            Should.Throw<ArgumentNullException>(() => maintainer.Enqueue("revokeKey", DateTime.UtcNow));
         }
 
         private void SetupDateTime()

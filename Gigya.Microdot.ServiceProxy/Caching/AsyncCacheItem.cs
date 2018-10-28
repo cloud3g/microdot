@@ -49,8 +49,8 @@ namespace Gigya.Microdot.ServiceProxy.Caching
         public string LogData { get; set; }
 
         /// <summary>
-        /// If >0, should not be cached, as was revoked while calling to factory
+        /// Should not be cached, as was revoked while calling to factory
         /// </summary>
-        public volatile int Revoked;
+        public volatile bool Revoked;
     }
 }
