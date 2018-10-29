@@ -69,13 +69,15 @@ namespace Gigya.Microdot.ServiceProxy.Caching
                 {
                     Maintain(TimeSpan.FromMilliseconds(intervalMs));
                 }
-                catch (ObjectDisposedException){}
                 catch (Exception ex)
                 {
                     log.Critical(x => x("Programmatic error", exception: ex));
                 }
                 finally{
-                    _timer.Change(intervalMs, Timeout.Infinite);
+                    try{
+                        _timer.Change(intervalMs, Timeout.Infinite);
+                    }
+                    catch (ObjectDisposedException){}
                 }
             });
 
