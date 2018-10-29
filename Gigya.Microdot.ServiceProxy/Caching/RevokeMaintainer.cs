@@ -105,8 +105,12 @@ namespace Gigya.Microdot.ServiceProxy.Caching
                 _revokesQueue.TryDequeue(out _);
 
                 // "Empty" keys and older than interval.
-                if (_reverseIndex.TryGetValue(revokeKey, out var reverseItem) && !reverseItem.CacheKeysSet.Any())
-                    _reverseIndex.TryRemove(revokeKey, out _);
+                // We compete on possible call, adding the value to cache, exactly when timer fired...
+                if (_reverseIndex.TryGetValue(revokeKey, out var reverseItem))
+                    if (!reverseItem.CacheKeysSet.Any())
+                        lock (reverseItem.CacheKeysSet)
+                            if (!reverseItem.CacheKeysSet.Any())
+                                _reverseIndex.TryRemove(revokeKey, out _);
             }
         }
 

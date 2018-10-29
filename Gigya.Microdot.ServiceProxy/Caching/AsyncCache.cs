@@ -142,6 +142,8 @@ namespace Gigya.Microdot.ServiceProxy.Caching
                 });
 
                 rItem.WhenRevoked = now;
+
+                // Lock wide while processing ALL the keys, to compete with possible call (and insertion to cache) to be in consistent state
                 lock (rItem)
                 {
                     // We have to copy aside, else MemoryCache remove call back 100% modifying CacheKeysSet
@@ -185,6 +187,9 @@ namespace Gigya.Microdot.ServiceProxy.Caching
                     if (shouldLog)
                         Log.Info(x => x("Cache item is waiting for value to be resolved", unencryptedTags: new { cacheKey, cacheGroup,cacheData }));
 
+                    // Indicate when data source was called for actual result (beginning of request)
+                    var whenCalled = DateTime.UtcNow;
+
                     var result = await factory().ConfigureAwait(false);
 
                     if (shouldLog)
@@ -207,7 +212,7 @@ namespace Gigya.Microdot.ServiceProxy.Caching
                                 Log.Info(x => x("RevokeKey added to reverse index", unencryptedTags: new { revokeKey, cacheKey, cacheGroup, cacheData }));
                         }
 
-                        AlreadyRevoked(item, revokeKeys, shouldLog, cacheGroup, cacheData);
+                        AlreadyRevoked(item, whenCalled, revokeKeys, shouldLog, cacheGroup, cacheData);
                     }
 
                     Stats.AwaitingResult.Decrement(metricsKeys);
@@ -215,9 +220,7 @@ namespace Gigya.Microdot.ServiceProxy.Caching
                 }
                 catch(Exception exception)
                 {
-                    Log.Info(x => x("Error resolving value for cache item", unencryptedTags: new {
-                        cacheKey, cacheGroup, cacheData, removeOnException, errorMessage = exception.Message
-                        }));
+                    Log.Warn(x => x("Error resolving value for cache item", unencryptedTags: new {cacheKey, cacheGroup, cacheData, removeOnException}, exception: exception));
 
                     if(removeOnException)
                         MemoryCache.Remove(cacheKey); // Do not cache exceptions.
@@ -249,7 +252,6 @@ namespace Gigya.Microdot.ServiceProxy.Caching
                 {
                     Stats.Misses.Mark(metricsKeys);
                     Stats.AwaitingResult.Increment(metricsKeys);
-                    newItem.WhenCalled = DateTime.UtcNow;
                     newItem.CurrentValueTask = WrappedFactory(newItem, true);
                     newItem.NextRefreshTime = DateTime.UtcNow + policy.RefreshTime;
                     resultTask = newItem.CurrentValueTask;
@@ -272,12 +274,11 @@ namespace Gigya.Microdot.ServiceProxy.Caching
                                 {
                                     try
                                     {
-                                        existingItem.WhenCalled = DateTime.UtcNow;
                                         var getNewValue = WrappedFactory(existingItem, false);
                                         await getNewValue.ConfigureAwait(false);
                                         existingItem.CurrentValueTask = getNewValue;
                                         existingItem.NextRefreshTime = DateTime.UtcNow + policy.RefreshTime;
-                                        if(!existingItem.Revoked)
+                                        if(!existingItem.AlreadyRevoked)
                                             MemoryCache.Set(new CacheItem(cacheKey, existingItem), policy);
                                     }
                                     catch
@@ -302,7 +303,7 @@ namespace Gigya.Microdot.ServiceProxy.Caching
         /// Handle the case the revoke received in the middle of call to data source so the cacheItem should be removed.
         /// If won't be removed the cache item contains stall value unless evicted by policy, meaning "wrong" value returned.
         /// </summary>
-        private void AlreadyRevoked(AsyncCacheItem cacheItem, IEnumerable<string> revokeKeys, bool shouldLog, string cacheGroup, string cacheData)
+        private void AlreadyRevoked(AsyncCacheItem cacheItem, DateTime whenCalled, IEnumerable<string> revokeKeys, bool shouldLog, string cacheGroup, string cacheData)
         {
             foreach (var revokeKey in revokeKeys)
             {
@@ -310,10 +311,11 @@ namespace Gigya.Microdot.ServiceProxy.Caching
                     continue;
 
                 // The cached item should be removed as revoke received after calling to data source
-                if (reverseItem.WhenRevoked < cacheItem.WhenCalled)
+                if (reverseItem.WhenRevoked < whenCalled)
                     continue;
 
-                cacheItem.Revoked = true;
+                // Signal to refresh task don't cache
+                cacheItem.AlreadyRevoked = true;
 
                 // Race with OnRevoke, avoid possible modification exception
                 string[] cacheKeys;
@@ -329,7 +331,7 @@ namespace Gigya.Microdot.ServiceProxy.Caching
                     {
                         var removed = isRemoved; // changing closure in loop
                         Log.Info(x => x("Removing cacheKey (revoked before call)", unencryptedTags: new {
-                            cacheKey, cacheGroup, cacheData, removed, revokeKey, diff = cacheItem.WhenCalled - reverseItem.WhenRevoked
+                            cacheKey, cacheGroup, cacheData, removed, revokeKey, diff = whenCalled - reverseItem.WhenRevoked
                         }));
                     }
                 }
@@ -414,6 +416,7 @@ namespace Gigya.Microdot.ServiceProxy.Caching
 
         public void Clear()
         {
+            // TODO: as we aren't completely sure what is go on with ongoing tasks completing on edge of reference replacement
             var oldMemoryCache = MemoryCache;
             MemoryCache = new MemoryCache(nameof(AsyncCache) + Interlocked.Increment(ref _clearCount), new NameValueCollection { { "PollingInterval", "00:00:01" } });
 
