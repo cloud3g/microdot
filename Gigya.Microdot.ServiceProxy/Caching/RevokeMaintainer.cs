@@ -53,14 +53,14 @@ namespace Gigya.Microdot.ServiceProxy.Caching
     {
         private readonly Timer _timer;
         private readonly ConcurrentQueue<Tuple<string, DateTime>> _revokesQueue;
-        private  readonly ConcurrentDictionary<string, ReverseItem> _reverseIndex;
+        private readonly Action<string> _onMaintain;
 
         public int QueueCount => _revokesQueue.Count;
 
-        public RevokeQueueMaintainer(ConcurrentDictionary<string, ReverseItem> reverseIndex, ILog log, Func<CacheConfig> getRevokeConfig)
+        public RevokeQueueMaintainer(Action<string> onMaintain, ILog log, Func<CacheConfig> getRevokeConfig)
         {
-            _reverseIndex = reverseIndex;
             _revokesQueue = new ConcurrentQueue<Tuple<string, DateTime>>();
+            _onMaintain = onMaintain;
 
             _timer = new Timer(_ =>
             {
@@ -104,13 +104,7 @@ namespace Gigya.Microdot.ServiceProxy.Caching
 
                 _revokesQueue.TryDequeue(out _);
 
-                // "Empty" keys and older than interval.
-                // We compete on possible call, adding the value to cache, exactly when timer fired...
-                if (_reverseIndex.TryGetValue(revokeKey, out var reverseItem))
-                    if (!reverseItem.CacheKeysSet.Any())
-                        lock (reverseItem.CacheKeysSet)
-                            if (!reverseItem.CacheKeysSet.Any())
-                                _reverseIndex.TryRemove(revokeKey, out _);
+                _onMaintain?.Invoke(revokeKey);
             }
         }
 

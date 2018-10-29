@@ -51,10 +51,10 @@ namespace Gigya.Microdot.UnitTests.Caching
 
             var consoleLog = new ConsoleLog();
             Func<CacheConfig> revokeConfig = () => new CacheConfig();
-            Func<ConcurrentDictionary<string, ReverseItem>, IRevokeQueueMaintainer> createRM = index => new RevokeQueueMaintainer(index, consoleLog, revokeConfig);
-            return new AsyncCache(consoleLog, Metric.Context("AsyncCache"), TimeFake, revokeListener, revokeConfig, createRM);
+            Func<Action<string>, IRevokeQueueMaintainer> createRm = onMaintain => new RevokeQueueMaintainer(onMaintain, consoleLog, revokeConfig);
+            return new AsyncCache(consoleLog, Metric.Context("AsyncCache"), TimeFake, revokeListener, revokeConfig, createRm);
         }
-        
+
         private IMemoizer CreateMemoizer(AsyncCache cache)
         {
             var metadataProvider = new MetadataProvider();
@@ -282,9 +282,9 @@ namespace Gigya.Microdot.UnitTests.Caching
 
             var consoleLog = new ConsoleLog();
             Func<CacheConfig> revokeConfig = () => new CacheConfig();
-            Func<ConcurrentDictionary<string, ReverseItem>, IRevokeQueueMaintainer> createRM = index => new RevokeQueueMaintainer(index, consoleLog, revokeConfig);
-
-            IMemoizer memoizer = new AsyncMemoizer(new AsyncCache(consoleLog, Metric.Context("AsyncCache"), new DateTimeImpl(), new EmptyRevokeListener(), revokeConfig, createRM), 
+            Func<Action<string>, IRevokeQueueMaintainer> createRm = onMaintain => new RevokeQueueMaintainer(onMaintain, consoleLog, revokeConfig);
+            
+            IMemoizer memoizer = new AsyncMemoizer(new AsyncCache(consoleLog, Metric.Context("AsyncCache"), new DateTimeImpl(), new EmptyRevokeListener(), revokeConfig, createRm), 
                                                    new MetadataProvider(), Metric.Context("Tests"));
 
             // T = 0s. No data in cache, should retrieve value from source (5).
@@ -322,9 +322,9 @@ namespace Gigya.Microdot.UnitTests.Caching
 
             var consoleLog = new ConsoleLog();
             Func<CacheConfig> revokeConfig = () => new CacheConfig();
-            Func<ConcurrentDictionary<string, ReverseItem>, IRevokeQueueMaintainer> createRM = index => new RevokeQueueMaintainer(index, consoleLog, revokeConfig);
+            Func<Action<string>, IRevokeQueueMaintainer> createRm = onMaintain => new RevokeQueueMaintainer(onMaintain, consoleLog, revokeConfig);
 
-            IMemoizer memoizer = new AsyncMemoizer(new AsyncCache(consoleLog, Metric.Context("AsyncCache"), new DateTimeImpl(), new EmptyRevokeListener(), revokeConfig, createRM), 
+            IMemoizer memoizer = new AsyncMemoizer(new AsyncCache(consoleLog, Metric.Context("AsyncCache"), new DateTimeImpl(), new EmptyRevokeListener(), revokeConfig, createRm), 
                 new MetadataProvider(), Metric.Context("Tests"));
 
 

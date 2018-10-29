@@ -96,10 +96,10 @@ namespace Gigya.Microdot.ServiceProxy.Caching
         /// </summary>
         internal int CacheKeyCount => RevokeKeyToCacheKeysIndex.Sum(item => item.Value.CacheKeysSet.Count);
 
-        public AsyncCache(ILog log, MetricsContext metrics, IDateTime dateTime, IRevokeListener revokeListener, Func<CacheConfig> getRevokeConfig, Func<ConcurrentDictionary<string, ReverseItem>, IRevokeQueueMaintainer> funcRevokesMaintainer)
+        public AsyncCache(ILog log, MetricsContext metrics, IDateTime dateTime, IRevokeListener revokeListener, Func<CacheConfig> getRevokeConfig, Func<Action<string>, IRevokeQueueMaintainer> funcRevokesMaintainer)
         {
             // Clean up queue of revokes periodically
-            _revokesMaintainer = funcRevokesMaintainer(RevokeKeyToCacheKeysIndex);
+            _revokesMaintainer = funcRevokesMaintainer(OnMaintain);
 
             DateTime = dateTime;
             GetRevokeConfig = getRevokeConfig;
@@ -168,6 +168,17 @@ namespace Gigya.Microdot.ServiceProxy.Caching
                 Log.Warn("Error while revoking cache", exception: ex, unencryptedTags: new {revokeKey});
             }
             return Task.FromResult(true);
+        }
+
+        private void OnMaintain(string revokeKey)
+        {
+            // Cleanup empty and older than interval keys.
+            // We compete on possible call, adding the value to cache, exactly when timer fired...
+            if (RevokeKeyToCacheKeysIndex.TryGetValue(revokeKey, out var reverseItem))
+                if (!reverseItem.CacheKeysSet.Any())
+                    lock (reverseItem.CacheKeysSet)
+                        if (!reverseItem.CacheKeysSet.Any())
+                            RevokeKeyToCacheKeysIndex.TryRemove(revokeKey, out _);
         }
 
         public Task GetOrAdd(string cacheKey, Func<Task> factory, Type taskResultType, CacheItemPolicyEx policy, string cacheGroup, string cacheData, string[] metricsKeys)

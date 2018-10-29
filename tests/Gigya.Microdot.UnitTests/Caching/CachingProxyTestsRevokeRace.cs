@@ -259,10 +259,7 @@ namespace Gigya.Microdot.UnitTests.Caching
             
             _kernel.Get<Func<CacheConfig>>()().RevokesCleanupMs.ShouldBe(x);
 
-            var maintainerF = _kernel.Get<Func<ConcurrentDictionary<string, ReverseItem>, IRevokeQueueMaintainer>>();
-
-            var reverseIndex = new ConcurrentDictionary<string, ReverseItem>();
-            var maintainer = maintainerF(reverseIndex);
+            var maintainer = _kernel.Get<Func<Action<string>, IRevokeQueueMaintainer>>()(null);
 
             var dateTime = DateTime.UtcNow;
             var total = 500;
@@ -275,7 +272,6 @@ namespace Gigya.Microdot.UnitTests.Caching
             await Task.Delay(x*2);
 
             // expect less, but not necessarily zero
-            reverseIndex.Count.ShouldBeLessThan(total);
             maintainer.QueueCount.ShouldBeLessThan(total);
         }
 
@@ -285,10 +281,7 @@ namespace Gigya.Microdot.UnitTests.Caching
             _configDic = new Dictionary<string, string>();
             _kernel = new TestingKernel<ConsoleLog>(mockConfig: _configDic);
 
-            var maintainerF = _kernel.Get<Func<ConcurrentDictionary<string, ReverseItem>, IRevokeQueueMaintainer>>();
-
-            var reverseIndex = new ConcurrentDictionary<string, ReverseItem>();
-            var maintainer = maintainerF(reverseIndex);
+            var maintainer = _kernel.Get<Func<Action<string>, IRevokeQueueMaintainer>>()(null);
 
             var dateTime = DateTime.UtcNow;
             var total = 500;
