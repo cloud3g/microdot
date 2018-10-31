@@ -43,11 +43,14 @@ namespace Gigya.Microdot.ServiceProxy.Caching
 
         void Enqueue(string revokeKey, DateTime now);
 
-        void Maintain(TimeSpan olderThan);
+        //void Maintain(TimeSpan olderThan);
     }
 
+    // convert to general-purpose time-bound queue; beware of concurrent Maintain() (double-lock around TryPeek)
+    // - Enqueue((time, T))
+    // - IEnumerable<(time, T)> Dequeue(time)
     /// <summary>
-    /// Cleaning periodically the reverse index and revokes queue.
+    /// ??
     /// </summary>
     public class RevokeQueueMaintainer : IRevokeQueueMaintainer
     {
@@ -59,7 +62,7 @@ namespace Gigya.Microdot.ServiceProxy.Caching
 
         public RevokeQueueMaintainer(Action<string> onMaintain, ILog log, Func<CacheConfig> getRevokeConfig)
         {
-            _revokesQueue = new ConcurrentQueue<Tuple<string, DateTime>>();
+            _revokesQueue = new ConcurrentQueue<Tuple<string, DateTime>>(); // named tuples?
             _onMaintain = onMaintain;
 
             _timer = new Timer(_ =>
@@ -89,12 +92,17 @@ namespace Gigya.Microdot.ServiceProxy.Caching
             _revokesQueue.Enqueue(new Tuple<string, DateTime>(revokeKey, now));
         }
 
-        public void Maintain(TimeSpan olderThan)
+        public void Maintain(TimeSpan olderThan) // , DateTime now
         {
             var cutOffTime = DateTime.UtcNow - olderThan;
 
             while (_revokesQueue.TryPeek(out var revoke)) // Empty queue
             {
+                // if item.time > ...
+                //   lock
+                //     if (TryPeek() && item.time > ...)
+                //       dequeu
+                //       yield return
                 var whenRevoked = revoke.Item2;
                 var revokeKey = revoke.Item1;
 
