@@ -285,14 +285,13 @@ namespace Gigya.Microdot.UnitTests.Caching
 
             // Add items, half older, half younger, IT IS A fifo QUEUE!
             for (int i = 0; i < total/2; i++)
-                maintainer.Enqueue("revokeKey", dateTime -TimeSpan.FromHours(1));   // older
+                maintainer.Enqueue(dateTime - TimeSpan.FromHours(1), "revokeKey");   // older
 
             for (int i = 0; i < total/2; i++)
-                maintainer.Enqueue("revokeKey", dateTime + TimeSpan.FromHours(1));   // younger
+                maintainer.Enqueue(dateTime + TimeSpan.FromHours(1), "revokeKey");   // younger
 
             // expect to dequeue half
-            IEnumerable<string> keys = 
-                maintainer.Dequeuing(dateTime - TimeSpan.FromSeconds(30)).ToArray();
+            var keys = maintainer.Dequeue(dateTime - TimeSpan.FromSeconds(30));
 
             maintainer.Count.ShouldBe(total / 2);
             keys.Count().ShouldBe(total / 2);

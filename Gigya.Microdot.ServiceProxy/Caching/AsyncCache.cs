@@ -82,7 +82,7 @@ namespace Gigya.Microdot.ServiceProxy.Caching
         private IDateTime DateTime { get; }
         private Func<CacheConfig> GetRevokeConfig { get; }
         private ILog Log { get; }
-        private MemoryCache MemoryCache { get; set; }
+        private MemoryCache MemoryCache { get; set; } // <cache key, AsyncCacheItem>, where cache key = hash(method name + params)
         private long LastCacheSizeBytes { get; set; }
         private Statistics Stats { get; }
 
@@ -112,12 +112,13 @@ namespace Gigya.Microdot.ServiceProxy.Caching
 
             Clear();
 
-            RevokeDisposable = revokeListener.RevokeSource.LinkTo(new ActionBlock<string>(OnRevoke));
+            RevokeDisposable = revokeListener.RevokeSource.LinkTo(new ActionBlock<string>(_ => OnRevoke(_)));
             
             // Clean up queue of revokes periodically
             _cleanUpToken = new CancellationTokenSource();
-            Task.Run(() => OnMaintain(_cleanUpToken.Token));
+            Task.Run(() => OnMaintain()).ContinueWith(_ => _cleanUpToken.Dispose());
         }
+
 
         private Task OnRevoke(string revokeKey)
         {
@@ -140,7 +141,7 @@ namespace Gigya.Microdot.ServiceProxy.Caching
                 // We need to handle race between Enqueue and factory/AlreadyRevoked
                 var rItem = RevokeKeyToCacheKeysIndex.GetOrAdd(revokeKey, k =>
                 {
-                    _revokesQueue.Enqueue(revokeKey, now);
+                    _revokesQueue.Enqueue(now, revokeKey);
                     return new ReverseItem { WhenRevoked = now };
                 });
 
@@ -173,24 +174,25 @@ namespace Gigya.Microdot.ServiceProxy.Caching
             return Task.FromResult(true);
         }
 
+
         /// <summary>
         /// Cleanup empty and older than interval keys.
         /// </summary>
-        private async Task OnMaintain(CancellationToken cancel)
+        private async Task OnMaintain()
         {
-            while (!cancel.IsCancellationRequested)
+            while (!_cleanUpToken.Token.IsCancellationRequested)
             {
-                var revokeKeys = _revokesQueue.Dequeuing(DateTime.UtcNow - TimeSpan.FromMilliseconds(GetRevokeConfig().RevokesCleanupMs));
+                var revokeKeys = _revokesQueue.Dequeue(DateTime.UtcNow - TimeSpan.FromMilliseconds(GetRevokeConfig().RevokesCleanupMs));
 
                 foreach (var revokeKey in revokeKeys)
-                    if (RevokeKeyToCacheKeysIndex.TryGetValue(revokeKey, out var reverseItem))
+                    if (RevokeKeyToCacheKeysIndex.TryGetValue(revokeKey.Data, out var reverseItem))
                         if (!reverseItem.CacheKeysSet.Any())
                             // We compete on possible call, adding the value to cache, exactly when dequeue-ing values
                             lock (reverseItem.CacheKeysSet)
                                 if (!reverseItem.CacheKeysSet.Any())
-                                    RevokeKeyToCacheKeysIndex.TryRemove(revokeKey, out _);
+                                    RevokeKeyToCacheKeysIndex.TryRemove(revokeKey.Data, out _);
 
-                await Task.Delay(GetRevokeConfig().RevokesCleanupMs, cancel);
+                await Task.Delay(GetRevokeConfig().RevokesCleanupMs, _cleanUpToken.Token);
             }
         }
 
