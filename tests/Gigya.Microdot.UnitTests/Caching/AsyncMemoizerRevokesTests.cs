@@ -32,10 +32,7 @@ namespace Gigya.Microdot.UnitTests.Caching
         {
 
             var consoleLog = new ConsoleLog();
-            Func<CacheConfig> revokeConfig = () => new CacheConfig();
-            Func<Action<string>, IRevokeQueueMaintainer> createRm = onMaintain => new RevokeQueueMaintainer(onMaintain, consoleLog, revokeConfig);
-            return new AsyncCache(consoleLog, Metric.Context(cacheContextName), TimeFake, 
-                                  new EmptyRevokeListener { RevokeSource = revokeSource }, revokeConfig, createRm);
+            return new AsyncCache(consoleLog, Metric.Context(cacheContextName), TimeFake, new EmptyRevokeListener { RevokeSource = revokeSource }, () => new CacheConfig());
         }
 
         private IMemoizer CreateMemoizer(AsyncCache cache)

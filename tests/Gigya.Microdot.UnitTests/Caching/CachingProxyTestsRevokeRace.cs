@@ -1,6 +1,6 @@
 ﻿using System;
-using System.Collections.Concurrent;
 using System.Collections.Generic;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Gigya.Microdot.Fakes;
@@ -9,6 +9,7 @@ using Gigya.Microdot.Interfaces.SystemWrappers;
 using Gigya.Microdot.ServiceDiscovery.Config;
 using Gigya.Microdot.ServiceProxy;
 using Gigya.Microdot.ServiceProxy.Caching;
+using Gigya.Microdot.SharedLogic.Collections;
 using Gigya.Microdot.Testing.Shared;
 using Gigya.Microdot.Testing.Shared.Utils;
 using Gigya.ServiceContract.HttpService;
@@ -56,7 +57,7 @@ namespace Gigya.Microdot.UnitTests.Caching
         [TearDown]
         public void TearDown()
         {
-            _kernel.Get<AsyncCache>().Clear();
+            _kernel.TryGet<AsyncCache>()?.Clear();
         }
 
         private void SetupServiceMock()
@@ -245,46 +246,42 @@ namespace Gigya.Microdot.UnitTests.Caching
             await ResultRevocableShouldBe(SecondResult, key, "Result shouldn't have been cached");
         }
 
-        [Repeat(1)]
-        [Test]
-        public async Task RevokeMaintainer_ShouldCleanupPeriodically()
-        {
-            int x = 100;
-            
-            _configDic = new Dictionary<string, string>{["Cache.RevokesCleanupMs"] = x.ToString()};
-            _kernel = new TestingKernel<ConsoleLog>(mockConfig: _configDic);
-            var c = _kernel.Get<Func<DiscoveryConfig>>()(); // required
-
-            SetupDateTime();
-            
-            _kernel.Get<Func<CacheConfig>>()().RevokesCleanupMs.ShouldBe(x);
-
-            var maintainer = _kernel.Get<Func<Action<string>, IRevokeQueueMaintainer>>()(null);
-
-            var dateTime = DateTime.UtcNow;
-            var total = 500;
-
-            // add items
-            for (int i = 0; i < total; i++)
-                maintainer.Enqueue("revokeKey" + i, dateTime);
-
-            // expect cleaning at least will be started
-            await Task.Delay(x*2);
-
-            // expect less, but not necessarily zero
-            maintainer.QueueCount.ShouldBeLessThan(total);
-        }
+        //[Repeat(1)]
+        //[Test]
+        //public async Task RevokeMaintainer_ShouldCleanupPeriodically()
+        //{
+        //    int x = 100;
+        //    
+        //    _configDic = new Dictionary<string, string>{["Cache.RevokesCleanupMs"] = x.ToString()};
+        //    _kernel = new TestingKernel<ConsoleLog>(mockConfig: _configDic);
+        //    var c = _kernel.Get<Func<DiscoveryConfig>>()(); // required
+        //
+        //    SetupDateTime();
+        //    
+        //    _kernel.Get<Func<CacheConfig>>()().RevokesCleanupMs.ShouldBe(x);
+        //
+        //    var maintainer = _kernel.Get<Func<Action<string>, IRevokeQueueMaintainer>>()(null);
+        //
+        //    var dateTime = DateTime.UtcNow;
+        //    var total = 500;
+        //
+        //    // add items
+        //    for (int i = 0; i < total; i++)
+        //        maintainer.Enqueue("revokeKey" + i, dateTime);
+        //
+        //    // expect cleaning at least will be started
+        //    await Task.Delay(x*2);
+        //
+        //    // expect less, but not necessarily zero
+        //    maintainer.QueueCount.ShouldBeLessThan(total);
+        //}
 
         [Test]
         public async Task RevokeMaintainer_ShouldCleanupOnlyOlderThan()
         {
-            _configDic = new Dictionary<string, string>();
-            _kernel = new TestingKernel<ConsoleLog>(mockConfig: _configDic);
-
-            var maintainer = _kernel.Get<Func<Action<string>, IRevokeQueueMaintainer>>()(null);
-
             var dateTime = DateTime.UtcNow;
             var total = 500;
+            var maintainer = new TimeBoundConcurrentQueue<string>();
 
             // Add items, half older, half younger, IT IS A fifo QUEUE!
             for (int i = 0; i < total/2; i++)
@@ -293,10 +290,12 @@ namespace Gigya.Microdot.UnitTests.Caching
             for (int i = 0; i < total/2; i++)
                 maintainer.Enqueue("revokeKey", dateTime + TimeSpan.FromHours(1));   // younger
 
-            // expect to clean half
-            maintainer.Maintain(TimeSpan.FromSeconds(30));
+            // expect to dequeue half
+            IEnumerable<string> keys = 
+                maintainer.Dequeuing(dateTime - TimeSpan.FromSeconds(30)).ToArray();
 
-            maintainer.QueueCount.ShouldBe(total / 2);
+            maintainer.Count.ShouldBe(total / 2);
+            keys.Count().ShouldBe(total / 2);
         }
 
         private void SetupDateTime()

@@ -50,9 +50,7 @@ namespace Gigya.Microdot.UnitTests.Caching
                 revokeListener.RevokeSource = revokeSource;
 
             var consoleLog = new ConsoleLog();
-            Func<CacheConfig> revokeConfig = () => new CacheConfig();
-            Func<Action<string>, IRevokeQueueMaintainer> createRm = onMaintain => new RevokeQueueMaintainer(onMaintain, consoleLog, revokeConfig);
-            return new AsyncCache(consoleLog, Metric.Context("AsyncCache"), TimeFake, revokeListener, revokeConfig, createRm);
+            return new AsyncCache(consoleLog, Metric.Context("AsyncCache"), TimeFake, revokeListener, () => new CacheConfig());
         }
 
         private IMemoizer CreateMemoizer(AsyncCache cache)
@@ -281,10 +279,7 @@ namespace Gigya.Microdot.UnitTests.Caching
             var args = new object[] { "someString" };
 
             var consoleLog = new ConsoleLog();
-            Func<CacheConfig> revokeConfig = () => new CacheConfig();
-            Func<Action<string>, IRevokeQueueMaintainer> createRm = onMaintain => new RevokeQueueMaintainer(onMaintain, consoleLog, revokeConfig);
-            
-            IMemoizer memoizer = new AsyncMemoizer(new AsyncCache(consoleLog, Metric.Context("AsyncCache"), new DateTimeImpl(), new EmptyRevokeListener(), revokeConfig, createRm), 
+            IMemoizer memoizer = new AsyncMemoizer(new AsyncCache(consoleLog, Metric.Context("AsyncCache"), new DateTimeImpl(), new EmptyRevokeListener(), () => new CacheConfig()), 
                                                    new MetadataProvider(), Metric.Context("Tests"));
 
             // T = 0s. No data in cache, should retrieve value from source (5).
@@ -321,10 +316,7 @@ namespace Gigya.Microdot.UnitTests.Caching
             var dataSource = CreateDataSource(870, refreshTask, 1002);
 
             var consoleLog = new ConsoleLog();
-            Func<CacheConfig> revokeConfig = () => new CacheConfig();
-            Func<Action<string>, IRevokeQueueMaintainer> createRm = onMaintain => new RevokeQueueMaintainer(onMaintain, consoleLog, revokeConfig);
-
-            IMemoizer memoizer = new AsyncMemoizer(new AsyncCache(consoleLog, Metric.Context("AsyncCache"), new DateTimeImpl(), new EmptyRevokeListener(), revokeConfig, createRm), 
+            IMemoizer memoizer = new AsyncMemoizer(new AsyncCache(consoleLog, Metric.Context("AsyncCache"), new DateTimeImpl(), new EmptyRevokeListener(), () => new CacheConfig()), 
                 new MetadataProvider(), Metric.Context("Tests"));
 
 

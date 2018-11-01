@@ -35,6 +35,7 @@ using Gigya.Microdot.Interfaces.SystemWrappers;
 using Gigya.ServiceContract.HttpService;
 using Metrics;
 using System.Threading.Tasks.Dataflow;
+using Gigya.Microdot.SharedLogic.Collections;
 
 // ReSharper disable InconsistentlySynchronizedField // Stats/Metrics filed related
 
@@ -85,7 +86,8 @@ namespace Gigya.Microdot.ServiceProxy.Caching
         private long LastCacheSizeBytes { get; set; }
         private Statistics Stats { get; }
 
-        private readonly IRevokeQueueMaintainer _revokesMaintainer;
+        private readonly CancellationTokenSource _cleanUpToken;
+        private readonly TimeBoundConcurrentQueue<string> _revokesQueue = new TimeBoundConcurrentQueue<string>();
         internal ConcurrentDictionary<string, ReverseItem> RevokeKeyToCacheKeysIndex { get; set; } = new ConcurrentDictionary<string, ReverseItem>();
         private IDisposable RevokeDisposable { get; }
 
@@ -96,11 +98,8 @@ namespace Gigya.Microdot.ServiceProxy.Caching
         /// </summary>
         internal int CacheKeyCount => RevokeKeyToCacheKeysIndex.Sum(item => item.Value.CacheKeysSet.Count);
 
-        public AsyncCache(ILog log, MetricsContext metrics, IDateTime dateTime, IRevokeListener revokeListener, Func<CacheConfig> getRevokeConfig, Func<Action<string>, IRevokeQueueMaintainer> funcRevokesMaintainer)
+        public AsyncCache(ILog log, MetricsContext metrics, IDateTime dateTime, IRevokeListener revokeListener, Func<CacheConfig> getRevokeConfig)
         {
-            // Clean up queue of revokes periodically
-            _revokesMaintainer = funcRevokesMaintainer(OnMaintain);
-
             DateTime = dateTime;
             GetRevokeConfig = getRevokeConfig;
             Stats = new Statistics(this, metrics);
@@ -114,6 +113,10 @@ namespace Gigya.Microdot.ServiceProxy.Caching
             Clear();
 
             RevokeDisposable = revokeListener.RevokeSource.LinkTo(new ActionBlock<string>(OnRevoke));
+            
+            // Clean up queue of revokes periodically
+            _cleanUpToken = new CancellationTokenSource();
+            Task.Run(() => OnMaintain(_cleanUpToken.Token));
         }
 
         private Task OnRevoke(string revokeKey)
@@ -137,7 +140,7 @@ namespace Gigya.Microdot.ServiceProxy.Caching
                 // We need to handle race between Enqueue and factory/AlreadyRevoked
                 var rItem = RevokeKeyToCacheKeysIndex.GetOrAdd(revokeKey, k =>
                 {
-                    _revokesMaintainer.Enqueue(revokeKey, now);
+                    _revokesQueue.Enqueue(revokeKey, now);
                     return new ReverseItem { WhenRevoked = now };
                 });
 
@@ -170,15 +173,25 @@ namespace Gigya.Microdot.ServiceProxy.Caching
             return Task.FromResult(true);
         }
 
-        private void OnMaintain(string revokeKey)
+        /// <summary>
+        /// Cleanup empty and older than interval keys.
+        /// </summary>
+        private async Task OnMaintain(CancellationToken cancel)
         {
-            // Cleanup empty and older than interval keys.
-            // We compete on possible call, adding the value to cache, exactly when timer fired...
-            if (RevokeKeyToCacheKeysIndex.TryGetValue(revokeKey, out var reverseItem))
-                if (!reverseItem.CacheKeysSet.Any())
-                    lock (reverseItem.CacheKeysSet)
+            while (!cancel.IsCancellationRequested)
+            {
+                var revokeKeys = _revokesQueue.Dequeuing(DateTime.UtcNow - TimeSpan.FromMilliseconds(GetRevokeConfig().RevokesCleanupMs));
+
+                foreach (var revokeKey in revokeKeys)
+                    if (RevokeKeyToCacheKeysIndex.TryGetValue(revokeKey, out var reverseItem))
                         if (!reverseItem.CacheKeysSet.Any())
-                            RevokeKeyToCacheKeysIndex.TryRemove(revokeKey, out _);
+                            // We compete on possible call, adding the value to cache, exactly when dequeue-ing values
+                            lock (reverseItem.CacheKeysSet)
+                                if (!reverseItem.CacheKeysSet.Any())
+                                    RevokeKeyToCacheKeysIndex.TryRemove(revokeKey, out _);
+
+                await Task.Delay(GetRevokeConfig().RevokesCleanupMs, cancel);
+            }
         }
 
         public Task GetOrAdd(string cacheKey, Func<Task> factory, Type taskResultType, CacheItemPolicyEx policy, string cacheGroup, string cacheData, string[] metricsKeys)
@@ -457,7 +470,7 @@ namespace Gigya.Microdot.ServiceProxy.Caching
 
         public void Dispose()
         {
-            _revokesMaintainer.Dispose();
+            _cleanUpToken.Cancel();
             MemoryCache?.Dispose();
             RevokeDisposable?.Dispose();
         }
