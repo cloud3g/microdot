@@ -6,10 +6,10 @@ using Gigya.Microdot.SharedLogic.Utils;
 namespace Gigya.Microdot.SharedLogic.Collections
 {
     /// <summary>
-    /// A general purpose queue (FIFO) to keep items younger then a cut of time.
+    /// A general purpose queue (FIFO) to keep items queued after a cut off time.
     /// </summary>
     /// <remarks>
-    /// Items expected to be queued time sequentially while the next queued greater or equal to previous 'now'.
+    /// Items expected to be queued sequentially in time while the next queued greater or equal to previous 'now'.
     /// If condition violated, the dequeue will keep items out of expected order.
     /// </remarks>
     /// <typeparam name="T"></typeparam>
@@ -30,10 +30,9 @@ namespace Gigya.Microdot.SharedLogic.Collections
         }
 
         /// <summary>
-        /// Dequeues and returns items from the queue as long as their <see cref="Item.Time"/> is older or equal to the
-        /// provided time.
+        /// Dequeues and returns items from the queue as long as their <see cref="Item.Time"/> is older or equal to the provided time.
         /// </summary>
-        /// <param name="olderThanOrEqual">The cut of time to dequeue items older or equal than.</param>
+        /// <param name="olderThanOrEqual">The cut off time to dequeue items older or equal than.</param>
         public ICollection<Item> Dequeue(DateTimeOffset olderThanOrEqual) 
         {
             var oldItems = new List<Item>();

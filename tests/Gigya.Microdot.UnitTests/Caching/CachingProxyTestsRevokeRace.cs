@@ -57,7 +57,9 @@ namespace Gigya.Microdot.UnitTests.Caching
         [TearDown]
         public void TearDown()
         {
-            _kernel.TryGet<AsyncCache>()?.Clear();
+            var asyncCache = _kernel.TryGet<AsyncCache>();
+            asyncCache?.Clear();
+            asyncCache?.Dispose();
         }
 
         private void SetupServiceMock()
@@ -246,39 +248,13 @@ namespace Gigya.Microdot.UnitTests.Caching
             await ResultRevocableShouldBe(SecondResult, key, "Result shouldn't have been cached");
         }
 
-        //[Repeat(1)]
-        //[Test]
-        //public async Task RevokeMaintainer_ShouldCleanupPeriodically()
-        //{
-        //    int x = 100;
-        //    
-        //    _configDic = new Dictionary<string, string>{["Cache.RevokesCleanupMs"] = x.ToString()};
-        //    _kernel = new TestingKernel<ConsoleLog>(mockConfig: _configDic);
-        //    var c = _kernel.Get<Func<DiscoveryConfig>>()(); // required
-        //
-        //    SetupDateTime();
-        //    
-        //    _kernel.Get<Func<CacheConfig>>()().RevokesCleanupMs.ShouldBe(x);
-        //
-        //    var maintainer = _kernel.Get<Func<Action<string>, IRevokeQueueMaintainer>>()(null);
-        //
-        //    var dateTime = DateTime.UtcNow;
-        //    var total = 500;
-        //
-        //    // add items
-        //    for (int i = 0; i < total; i++)
-        //        maintainer.Enqueue("revokeKey" + i, dateTime);
-        //
-        //    // expect cleaning at least will be started
-        //    await Task.Delay(x*2);
-        //
-        //    // expect less, but not necessarily zero
-        //    maintainer.QueueCount.ShouldBeLessThan(total);
-        //}
-
         [Test]
         public async Task RevokeMaintainer_ShouldCleanupOnlyOlderThan()
         {
+            // Tear down using kernel, despite test doesn't
+            _configDic = new Dictionary<string,string>();
+            _kernel = new TestingKernel<ConsoleLog>(mockConfig: _configDic);
+
             var dateTime = DateTime.UtcNow;
             var total = 500;
             var maintainer = new TimeBoundConcurrentQueue<string>();
@@ -294,7 +270,7 @@ namespace Gigya.Microdot.UnitTests.Caching
             var keys = maintainer.Dequeue(dateTime - TimeSpan.FromSeconds(30));
 
             maintainer.Count.ShouldBe(total / 2);
-            keys.Count().ShouldBe(total / 2);
+            keys.Count.ShouldBe(total / 2);
         }
 
         private void SetupDateTime()
